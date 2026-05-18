@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import joblib
 
 
 # ------------------------------------------------------------
@@ -294,55 +295,52 @@ st.markdown(
 # Placeholder data generation
 # ------------------------------------------------------------
 @st.cache_data
-def make_placeholder_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    np.random.seed(42)
+def load_real_data():
+    import os
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    historical_years = np.arange(1999, 2029)  # 30 years: 1999-2028
-    forecast_years = np.arange(2029, 2035)
+    # Historisk data
+    historical = pd.read_csv(os.path.join(BASE_DIR, "data", "clean", "clean_data.csv"))
+    historical['ds'] = pd.to_datetime(historical['ds'])
+    historical['year'] = historical['ds'].dt.year
+    historical = historical.groupby('year')['y'].mean().reset_index()
+    historical.columns = ['year', 'temperature']
 
-    baseline = 5.4
-    warming_trend = 0.045
-    seasonal_noise = np.sin(np.linspace(0, 4.3, len(historical_years))) * 0.22
-    random_noise = np.random.normal(0, 0.10, len(historical_years))
+    # ── Prophet ──
+    prophet_model = joblib.load("../models/prophet_model.pkl")
+    future = prophet_model.make_future_dataframe(periods=1461, freq='D')
+    forecast = prophet_model.predict(future)
+    forecast['year'] = forecast['ds'].dt.year
+    forecast_yearly = forecast[forecast['year'] > 2026].groupby('year').agg({
+        'yhat': 'mean',
+        'yhat_lower': 'mean',
+        'yhat_upper': 'mean'
+    }).reset_index()
+    forecast_yearly.columns = ['year', 'prophet', 'lower', 'upper']
+    forecast_yearly['confidence'] = (forecast_yearly['upper'] - forecast_yearly['lower']) / 2
+    forecast_yearly = forecast_yearly[forecast_yearly['year'] < 2030]
 
-    historical_temp = (
-        baseline
-        + warming_trend * (historical_years - historical_years[0])
-        + seasonal_noise
-        + random_noise
-    )
+    # ── Linear Regression ──
+    reg_model = joblib.load("../models/regression_model.pkl")
+    last_date = pd.to_datetime("2026-01-31")
+    min_date = pd.to_datetime("1996-04-02")
+    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=1461, freq='D')
+    future_days = (future_dates - min_date).days.values.reshape(-1, 1)
+    reg_pred = reg_model.predict(future_days)
 
-    historical = pd.DataFrame(
-        {
-            "year": historical_years,
-            "temperature": historical_temp,
-        }
-    )
+    reg_df = pd.DataFrame({'ds': future_dates, 'yhat': reg_pred})
+    reg_df['year'] = reg_df['ds'].dt.year
+    reg_yearly = reg_df[reg_df['year'] < 2030].groupby('year')['yhat'].mean().reset_index()
+    reg_yearly.columns = ['year', 'linear_regression']
 
-    last_temp = historical["temperature"].iloc[-1]
+    # ── Kombinera ──
+    forecast_yearly = forecast_yearly.merge(reg_yearly, on='year', how='left')
 
-    prophet_forecast = last_temp + 0.075 * np.arange(1, len(forecast_years) + 1)
-    prophet_forecast += np.sin(np.linspace(0.3, 1.9, len(forecast_years))) * 0.08
-
-    linear_forecast = last_temp + 0.052 * np.arange(1, len(forecast_years) + 1)
-
-    confidence = np.linspace(0.22, 0.42, len(forecast_years))
-
-    forecast = pd.DataFrame(
-        {
-            "year": forecast_years,
-            "prophet": prophet_forecast,
-            "linear_regression": linear_forecast,
-            "lower": prophet_forecast - confidence,
-            "upper": prophet_forecast + confidence,
-            "confidence": confidence,
-        }
-    )
-
-    return historical, forecast
+    return historical, forecast_yearly
 
 
-historical_df, forecast_df = make_placeholder_data()
+
+historical_df, forecast_df = load_real_data()
 
 forecast_2029 = forecast_df.loc[forecast_df["year"] == 2029, "prophet"].iloc[0]
 ci_2029 = forecast_df.loc[forecast_df["year"] == 2029, "confidence"].iloc[0]
@@ -488,7 +486,7 @@ with col1:
         <div class="stat-card">
             <p class="stat-label">Forecast 2029 temperature</p>
             <p class="stat-value">{forecast_2029:.2f}°C</p>
-            <p class="stat-note">Prophet placeholder estimate</p>
+            <p class="stat-note">Prophet model estimate</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -512,7 +510,7 @@ with col3:
         <div class="stat-card">
             <p class="stat-label">Historical data</p>
             <p class="stat-value">30 years</p>
-            <p class="stat-note">Placeholder range: 1999–2028</p>
+            <p class="stat-note">SMHI data: 1996–2026</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -528,7 +526,7 @@ st.markdown(
                 <h2 class="chart-title">Temperature forecast model comparison</h2>
                 <p class="chart-subtitle">
                     Historical observations, Prophet-style forecast, confidence band,
-                    and a linear regression baseline. Data is synthetic for now.
+                    and a linear regression baseline. Station Vinga A · 1996–2026 · Prophet vs Linear Regression.
                 </p>
             </div>
             <div class="badge">Interactive chart</div>
@@ -544,7 +542,7 @@ st.markdown("</div>", unsafe_allow_html=True)
 st.markdown(
     """
     <p class="footer-note">
-        nordcast prototype · placeholder data · ready for real climate datasets
+        nordcast · SMHI data 1996–2026 · RISE Hackathon 2026
     </p>
     """,
     unsafe_allow_html=True,
